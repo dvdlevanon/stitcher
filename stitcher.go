@@ -21,11 +21,39 @@ import (
 
 type Context struct {
 	outputs map[string]*TaskOutput
+	workingDirectoryStack []string
+}
+
+func (c *Context) getWorkingDirectory() string {
+	return c.workingDirectoryStack[len(c.workingDirectoryStack) - 1]
+}
+
+func (c *Context) pushWorkingDirectory(task Task) error {
+	relativePath := strings.ReplaceAll(task.getParent().GetPath(), ".", "/")
+	dir := filepath.Join(c.getWorkingDirectory(), relativePath)
+	c.workingDirectoryStack = append(c.workingDirectoryStack, dir)
+	
+	if err := os.Chdir(c.getWorkingDirectory()); err != nil {
+		return errors.Wrap(err, 0)
+	}
+	
+	fmt.Printf("Pushing current dir: %v\n", c.getWorkingDirectory())
+	return nil
+}
+
+func (c *Context) popWorkingDirectory() error {
+	c.workingDirectoryStack = c.workingDirectoryStack[:len(c.workingDirectoryStack) - 1]
+	
+	if err := os.Chdir(c.getWorkingDirectory()); err != nil {
+		return errors.Wrap(err, 0)
+	}
+	
+	fmt.Printf("Popping current dir: %v\n", c.getWorkingDirectory())
+	return nil
 }
 
 type TaskInput struct {
 	vars             map[string]string
-	WorkingDirectory string
 }
 
 type TaskOutput struct {
@@ -33,11 +61,11 @@ type TaskOutput struct {
 }
 
 type Task interface {
-	getWorkingDirecotry() string
 	getType() string
 	getName() string
 	setName(name string)
 	setParent(parent *Directory) error
+	getParent() *Directory
 	getPath(tasktype string) string
 	getId(tasktype string) string
 	run(context *Context, input *TaskInput) (*TaskOutput, error)
@@ -48,7 +76,6 @@ type Task interface {
 type CommonTask struct {
 	parent           *Directory
 	name             string
-	WorkingDirectory string
 }
 
 func (t *CommonTask) setParent(parent *Directory) error {
@@ -60,20 +87,16 @@ func (t *CommonTask) setParent(parent *Directory) error {
 	return nil
 }
 
+func (t *CommonTask) getParent() *Directory {
+	return t.parent
+}
+
 func (t *CommonTask) setName(name string) {
 	t.name = name
 }
 
 func (t *CommonTask) getName() string {
 	return t.name
-}
-
-func (t *CommonTask) getWorkingDirecotry() string {
-	if t.WorkingDirectory != "" {
-		return t.WorkingDirectory
-	}
-
-	return filepath.Join(t.parent.WorkingDirectory, t.name)
 }
 
 func (t *CommonTask) getPath(tasktype string) string {
@@ -122,7 +145,6 @@ func (e *Executable) EvaluateAndRun(exec string, input *TaskInput) (*execute.Exe
 	envs := make([]string, 0)
 
 	for key, val := range e.Envs {
-
 		expr := Expression{
 			Expr: val,
 		}
@@ -149,23 +171,22 @@ func (e *Executable) EvaluateAndRun(exec string, input *TaskInput) (*execute.Exe
 		args = append(args, evaluated)
 	}
 
-	return e.internalRun(exec, input.WorkingDirectory, envs, args, true)
+	return e.internalRun(exec, envs, args, true)
 }
 
-func (e *Executable) Run(exec string, dir string, streamStdio bool) (*execute.ExecResult, error) {
+func (e *Executable) Run(exec string, streamStdio bool) (*execute.ExecResult, error) {
 	envs := make([]string, 0)
 
 	for key, val := range e.Envs {
 		envs = append(envs, key+"="+val)
 	}
 
-	return e.internalRun(exec, dir, envs, e.Args, streamStdio)
+	return e.internalRun(exec, envs, e.Args, streamStdio)
 }
 
-func (e *Executable) internalRun(exec string, dir string, envs []string, args []string, streamStdio bool) (*execute.ExecResult, error) {
+func (e *Executable) internalRun(exec string, envs []string, args []string, streamStdio bool) (*execute.ExecResult, error) {
 	cmd := execute.ExecTask{
 		Command:      exec,
-		Cwd:          dir,
 		Env:          envs,
 		Args:         args,
 		Stdin:        os.Stdin,
@@ -238,7 +259,17 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 	vars := make(map[string]string)
 
 	for _, path := range t.Files {
-		file, err := os.Open(path)
+		expr := Expression{
+			Expr: path,
+		}
+
+		evaluated, err := expr.Evaluate(input)
+
+		if err != nil {
+			return nil, errors.Wrap(err, 0)
+		}
+		
+		file, err := os.Open(evaluated)
 
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
@@ -251,14 +282,22 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 		for scanner.Scan() {
 			line := scanner.Text()
 
+			if (strings.TrimSpace(line) == "") {
+				continue
+			}
+			
 			if strings.HasPrefix(strings.TrimSpace(line), "#") {
 				continue
+			}
+			
+			if strings.HasPrefix(strings.TrimSpace(line), "export ") {
+				line = line[len("export "):len(line)]
 			}
 
 			equalIndex := strings.Index(line, "=")
 
 			if equalIndex == -1 {
-				return nil, errors.Errorf("Invalid line %v in properties file %v", line, path)
+				return nil, errors.Errorf("Invalid line %v in properties file %v", line, evaluated)
 			}
 
 			key := line[0:equalIndex]
@@ -374,7 +413,8 @@ func (e *TerraformTask) getType() string {
 }
 
 func (e *TerraformTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
-	return nil, errors.New("Not implemented")
+	return nil, nil
+	// return nil, errors.New("Not implemented")
 }
 
 type AnsiblePlaybookTask struct {
@@ -567,6 +607,10 @@ func (p *Plan) run(context *Context) error {
 	fmt.Printf("Plan started\n")
 
 	for _, task := range p.tasks {
+		if err := context.pushWorkingDirectory(task); err != nil {
+			return errors.Wrap(err, 0)
+		}
+		
 		input, err := buildTaskInput(task, context)
 
 		if err != nil {
@@ -578,8 +622,16 @@ func (p *Plan) run(context *Context) error {
 		if err != nil {
 			return errors.Wrap(err, 0)
 		}
-
+		
+		if output == nil {
+			return errors.Errorf("Output is null for task %v", task)
+		}
+		
 		context.outputs[task.getPath(task.getType())] = output
+		
+		if err := context.popWorkingDirectory(); err != nil {
+			return errors.Wrap(err, 0)
+		}
 	}
 
 	fmt.Printf("Plan done\n")
@@ -628,7 +680,6 @@ func buildTaskInput(task Task, context *Context) (*TaskInput, error) {
 
 	return &TaskInput{
 		vars:             vars,
-		WorkingDirectory: "/tmp",
 	}, nil
 }
 
@@ -689,8 +740,8 @@ func (e *Expression) Evaluate(input *TaskInput) (string, error) {
 					file.Name(),
 				},
 			}
-
-			result, err := exec.Run("/bin/bash", input.WorkingDirectory, false)
+			
+			result, err := exec.Run("/bin/bash", false)
 
 			if err != nil {
 				return "", err
@@ -741,7 +792,6 @@ type Directory struct {
 	parent           *Directory
 	children         map[string]*Directory
 	tasks            map[string]Task
-	WorkingDirectory string
 	shortNamesIndex  map[string][]Task
 }
 
@@ -960,14 +1010,14 @@ func mainRun() error {
 	bytes, err := ioutil.ReadFile("/home/david/work/my-projects/stitcher/stitcher.yml")
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, 0)
 	}
 
 	y := make(map[interface{}]interface{})
 	yaml.Unmarshal(bytes, y)
 
 	if err := root.DecodeYaml(y); err != nil {
-		return err
+		return errors.Wrap(err, 0)
 	}
 	
 	envs := EnvsTask{
@@ -981,94 +1031,35 @@ func mainRun() error {
 	root.PrintTree(0)
 	fmt.Printf("---------------\n")
 	
-	taskToRun := []string{"ami.script"}
+	taskToRun := []string{"kubernetes.sightd.helmfile"}
 	
 	plan, err := BuildPlan(root, taskToRun)
 	
 	if err != nil {
-		return err
+		return errors.Wrap(err, 0)
+	}
+	
+	fmt.Printf("Plan is %+v\n", plan)
+	
+	cwd, err := os.Getwd()
+
+	if err != nil {
+		return errors.Wrap(err, 0)
 	}
 	
 	context := Context{
 		outputs: make(map[string]*TaskOutput),
+		workingDirectoryStack: []string{ cwd, "/home/david/work/sightd/git/sgh-ops" },
+		
 	}
 
 	err = plan.run(&context)
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, 0)
 	}
 	
 	return nil
-	
-	
-	// cwd, err := os.Getwd()
-
-	// if err != nil {
-	// 	fmt.Printf("Error %v\n", err)
-	// 	return
-	// }
-
-	// envs := EnvsTask{
-	// 	CommonTask: CommonTask{
-	// 		name: "",
-	// 	},
-	// 	Envs: map[string]string{
-	// 		"SOME_ENVIRONMENT": "Some value",
-	// 		"SOME_COMPLEX_ENVIRONMENT": `{{ "." | absolute_path }}`,
-	// 	},
-	// }
-
-	// props := PropertiesTask{
-	// 	CommonTask: CommonTask{
-	// 		name: "common",
-	// 	},
-	// 	Files: []string{
-	// 		"/home/david/temp/temp/2021-09-30-230206/test.properties",
-	// 	},
-	// }
-
-	// script := ScriptTask{
-	// 	CommonTask: CommonTask{
-	// 		name: "test",
-	// 	},
-	// 	File: "/home/david/temp/temp/2021-09-30-230206/test.sh",
-	// 	Executable: Executable{
-	// 		Envs: map[string]string{
-	// 			"Dude":  `${properties.common.Dude} ${envs.SOME_ENVIRONMENT}`,
-	// 			"HELLO": `{{ ${properties.common.HELLO} | readFile | base64 }}`,
-	// 		},
-	// 		Args: []string{
-	// 			`{{ "echo bash-func" | bash }}`,
-	// 			"arg2",
-	// 			"${properties.common.Arg}",
-	// 			"${envs.SOME_COMPLEX_ENVIRONMENT}",
-	// 			"${envs.SIGHTD_SECRETS_DIRECTORY}",
-	// 		},
-	// 	},
-	// }
-
-	// root.addTask(&envs)
-	// root.addTask(&props)
-	// root.addTask(&script)
-
-	// plan := Plan{
-	// 	tasks: []Task{
-	// 		&envs,
-	// 		&props,
-	// 		&script,
-	// 	},
-	// }
-
-	// context := Context{
-	// 	outputs: make(map[string]*TaskOutput),
-	// }
-
-	// err = plan.run(&context)
-
-	// if err != nil {
-	// 	fmt.Printf("Error %v\n", err)
-	// }
 }
 
 func main() {
