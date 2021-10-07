@@ -1,6 +1,7 @@
 package main
 
 import (
+	gocontext "context"
 	"github.com/go-errors/errors"
 	"bytes"
 	"bufio"
@@ -17,6 +18,7 @@ import (
 	"text/template"
 	"gopkg.in/yaml.v2"
 	"github.com/stevenle/topsort"
+	"github.com/hashicorp/terraform-exec/tfexec"
 )
 
 type Context struct {
@@ -29,8 +31,28 @@ func (c *Context) getWorkingDirectory() string {
 }
 
 func (c *Context) pushWorkingDirectory(task Task) error {
-	relativePath := strings.ReplaceAll(task.getParent().GetPath(), ".", "/")
-	dir := filepath.Join(c.getWorkingDirectory(), relativePath)
+	dir := task.getWorkingDirectory()
+	
+	if !strings.HasPrefix(dir, "/") {
+		dir = filepath.Join(c.getWorkingDirectory(), dir)
+	}
+	
+	stat, err := os.Stat(dir)
+	
+	if os.IsNotExist(err) || !stat.IsDir() {
+		base := filepath.Base(dir)
+		
+		if base == task.getName() {
+			dir = filepath.Dir(dir)
+		}
+	}
+	
+	stat, err = os.Stat(dir)
+	
+	if os.IsNotExist(err) {
+		return errors.Errorf("Directory not found %v", dir)
+	}
+	
 	c.workingDirectoryStack = append(c.workingDirectoryStack, dir)
 	
 	if err := os.Chdir(c.getWorkingDirectory()); err != nil {
@@ -67,6 +89,7 @@ type Task interface {
 	setParent(parent *Directory) error
 	getParent() *Directory
 	getPath(tasktype string) string
+	getWorkingDirectory() string
 	getId(tasktype string) string
 	run(context *Context, input *TaskInput) (*TaskOutput, error)
 	getExpressions() []string
@@ -76,6 +99,7 @@ type Task interface {
 type CommonTask struct {
 	parent           *Directory
 	name             string
+	WorkingDirectory string `yaml:"directory"`
 }
 
 func (t *CommonTask) setParent(parent *Directory) error {
@@ -106,6 +130,20 @@ func (t *CommonTask) getPath(tasktype string) string {
 		return t.getId(tasktype)
 	} else {
 		return path + "." + t.getId(tasktype)
+	}
+}
+
+func (t *CommonTask) getWorkingDirectory() string {
+	if (t.WorkingDirectory != "" && strings.HasPrefix(t.WorkingDirectory, "/")) {
+		return t.WorkingDirectory
+	}
+	
+	dir := t.getParent().getWorkingDirectory()
+	
+	if (t.WorkingDirectory != "") {
+		return filepath.Join(dir, t.WorkingDirectory)
+	} else {
+		return filepath.Join(dir, t.name)
 	}
 }
 
@@ -208,7 +246,7 @@ func (e *Executable) internalRun(exec string, envs []string, args []string, stre
 }
 
 type ScriptTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
 	File string
 }
@@ -222,8 +260,6 @@ func (t *ScriptTask) getType() string {
 }
 
 func (t *ScriptTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
-	fmt.Printf("Script task running\n")
-
 	t.Args = append([]string{t.File}, t.Args...)
 	result, err := t.Executable.EvaluateAndRun("/bin/bash", input)
 
@@ -241,7 +277,7 @@ func (t *ScriptTask) run(context *Context, input *TaskInput) (*TaskOutput, error
 }
 
 type PropertiesTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Files []string `yaml:"files"`
 }
 
@@ -254,8 +290,6 @@ func (t *PropertiesTask) getType() string {
 }
 
 func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
-	fmt.Printf("Properties task running\n")
-
 	vars := make(map[string]string)
 
 	for _, path := range t.Files {
@@ -317,7 +351,7 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 }
 
 type VarsTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Vars map[string]string `yaml:",inline"`
 }
 
@@ -359,7 +393,7 @@ func (e *VarsTask) run(context *Context, input *TaskInput) (*TaskOutput, error) 
 }
 
 type EnvsTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Envs map[string]string `yaml:",inline"`
 }
 
@@ -397,7 +431,7 @@ type TerraformInit struct {
 }
 
 type TerraformTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Location string `yaml:"location"`
 	Executable `yaml:",inline"`
 	Init TerraformInit `yaml:"init"`
@@ -413,12 +447,68 @@ func (e *TerraformTask) getType() string {
 }
 
 func (e *TerraformTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
-	return nil, nil
-	// return nil, errors.New("Not implemented")
+	tf, err := tfexec.NewTerraform(context.getWorkingDirectory(), "/usr/local/bin/terraform")
+	
+	tf.SetStdout(os.Stdin)
+	tf.SetStderr(os.Stderr)
+	
+	if err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	
+	shouldrun, err := tf.Plan(gocontext.TODO())
+	
+	if err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	
+	if shouldrun {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print(`
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: `)
+  		
+  		answer, err := reader.ReadString('\n')
+  		
+  		if err != nil {
+			return nil, errors.Wrap(err, 0)
+		}
+		
+		if "yes" != strings.TrimSpace(answer) {
+			return nil, errors.Errorf("Aborted!")
+		}
+		
+		tf.Apply(gocontext.TODO())
+		
+		if err != nil {
+			return nil, errors.Wrap(err, 0)
+		}
+	}
+	
+	terraformOutput, err := tf.Output(gocontext.TODO())
+	
+	if err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	
+	vars := make(map[string]string)
+	
+	for key, val := range terraformOutput {
+		valstr := string(val.Value)
+		
+		vars[key] = valstr
+	}
+	
+	return &TaskOutput{
+		vars: vars,
+	}, nil
 }
 
 type AnsiblePlaybookTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
 	Playbook string `yaml:"playbook"`
 	Inventory string `yaml:"inventory"`
@@ -437,7 +527,7 @@ func (a *AnsiblePlaybookTask) run(context *Context, input *TaskInput) (*TaskOutp
 }
 
 type KubernetesTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
 	File string `yaml:"file"`
 }
@@ -455,7 +545,7 @@ func (k *KubernetesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 }
 
 type HelmfileTask struct {
-	CommonTask
+	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
 	File string `yaml:"file"`
 }
@@ -607,6 +697,8 @@ func (p *Plan) run(context *Context) error {
 	fmt.Printf("Plan started\n")
 
 	for _, task := range p.tasks {
+		fmt.Printf("Running %v.%v\n", task.getType(), task.getName())
+		
 		if err := context.pushWorkingDirectory(task); err != nil {
 			return errors.Wrap(err, 0)
 		}
@@ -793,6 +885,7 @@ type Directory struct {
 	children         map[string]*Directory
 	tasks            map[string]Task
 	shortNamesIndex  map[string][]Task
+	workingDirectory string
 }
 
 func NewDirectory(name string, parent *Directory) *Directory {
@@ -885,6 +978,26 @@ func (d *Directory) GetPath() string {
 	}
 }
 
+func (d *Directory) getWorkingDirectory() string {
+	if (d.workingDirectory != "" && strings.HasPrefix(d.workingDirectory, "/")) {
+		return d.workingDirectory
+	}
+	
+	var dir string
+	
+	if (d.parent == nil) {
+		dir = d.name
+	} else  {
+		dir = d.parent.getWorkingDirectory()
+	}
+	
+	if d.workingDirectory != "" {
+		return filepath.Join(dir, d.workingDirectory)
+	} else {
+		return filepath.Join(dir, d.name)
+	}
+}
+
 func (d *Directory) DecodeYaml(y map[interface{}]interface{}) error {
 	for keyobj, value := range y {
 		key, ok := keyobj.(string)
@@ -960,9 +1073,9 @@ func (d *Directory) PrintTree(depth int) {
 	
 	for _, task := range d.tasks {
 		if task.getName() == "" {
-			fmt.Printf("%v\t%v\n", prefix, task.getType())
+			fmt.Printf("%v\t%v (%v)\n", prefix, task.getType(), task.getWorkingDirectory())
 		} else {
-			fmt.Printf("%v\t%v.%v\n", prefix, task.getType(), task.getName())
+			fmt.Printf("%v\t%v.%v (%v)\n", prefix, task.getType(), task.getName(), task.getWorkingDirectory())
 		}
 		fmt.Printf("%v\t %+v\n\n", prefix, task.getExpressions())
 	}
