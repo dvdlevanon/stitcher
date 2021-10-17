@@ -1,81 +1,82 @@
 package main
 
 import (
-	gocontext "context"
-	"github.com/go-errors/errors"
-	"bytes"
 	"bufio"
-	"reflect"
+	"bytes"
+	gocontext "context"
 	"encoding/base64"
 	"fmt"
-	execute "github.com/alexellis/go-execute/pkg/v1"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
-	"gopkg.in/yaml.v2"
-	"github.com/stevenle/topsort"
+
+	execute "github.com/alexellis/go-execute/pkg/v1"
+	"github.com/go-errors/errors"
 	"github.com/hashicorp/terraform-exec/tfexec"
+	"github.com/stevenle/topsort"
+	"gopkg.in/yaml.v2"
 )
 
 type Context struct {
-	outputs map[string]*TaskOutput
+	outputs               map[string]*TaskOutput
 	workingDirectoryStack []string
 }
 
 func (c *Context) getWorkingDirectory() string {
-	return c.workingDirectoryStack[len(c.workingDirectoryStack) - 1]
+	return c.workingDirectoryStack[len(c.workingDirectoryStack)-1]
 }
 
 func (c *Context) pushWorkingDirectory(task Task) error {
 	dir := task.getWorkingDirectory()
-	
+
 	if !strings.HasPrefix(dir, "/") {
 		dir = filepath.Join(c.getWorkingDirectory(), dir)
 	}
-	
+
 	stat, err := os.Stat(dir)
-	
+
 	if os.IsNotExist(err) || !stat.IsDir() {
 		base := filepath.Base(dir)
-		
+
 		if base == task.getName() {
 			dir = filepath.Dir(dir)
 		}
 	}
-	
-	stat, err = os.Stat(dir)
-	
+
+	_, err = os.Stat(dir)
+
 	if os.IsNotExist(err) {
 		return errors.Errorf("Directory not found %v", dir)
 	}
-	
+
 	c.workingDirectoryStack = append(c.workingDirectoryStack, dir)
-	
+
 	if err := os.Chdir(c.getWorkingDirectory()); err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	fmt.Printf("Pushing current dir: %v\n", c.getWorkingDirectory())
 	return nil
 }
 
 func (c *Context) popWorkingDirectory() error {
-	c.workingDirectoryStack = c.workingDirectoryStack[:len(c.workingDirectoryStack) - 1]
-	
+	c.workingDirectoryStack = c.workingDirectoryStack[:len(c.workingDirectoryStack)-1]
+
 	if err := os.Chdir(c.getWorkingDirectory()); err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	fmt.Printf("Popping current dir: %v\n", c.getWorkingDirectory())
 	return nil
 }
 
 type TaskInput struct {
-	vars             map[string]string
+	vars map[string]string
 }
 
 type TaskOutput struct {
@@ -125,7 +126,7 @@ func (t *CommonTask) getName() string {
 
 func (t *CommonTask) getPath(tasktype string) string {
 	path := t.parent.GetPath()
-	
+
 	if path == "" {
 		return t.getId(tasktype)
 	} else {
@@ -134,13 +135,13 @@ func (t *CommonTask) getPath(tasktype string) string {
 }
 
 func (t *CommonTask) getWorkingDirectory() string {
-	if (t.WorkingDirectory != "" && strings.HasPrefix(t.WorkingDirectory, "/")) {
+	if t.WorkingDirectory != "" && strings.HasPrefix(t.WorkingDirectory, "/") {
 		return t.WorkingDirectory
 	}
-	
+
 	dir := t.getParent().getWorkingDirectory()
-	
-	if (t.WorkingDirectory != "") {
+
+	if t.WorkingDirectory != "" {
 		return filepath.Join(dir, t.WorkingDirectory)
 	} else {
 		return filepath.Join(dir, t.name)
@@ -165,7 +166,7 @@ func (t *CommonTask) TaskByUri(uri string) (Task, error) {
 
 type Executable struct {
 	Envs map[string]string `yaml:"envs"`
-	Args []string `yaml:"args"`
+	Args []string          `yaml:"args"`
 }
 
 func (e *Executable) getExpressions() []string {
@@ -248,7 +249,7 @@ func (e *Executable) internalRun(exec string, envs []string, args []string, stre
 type ScriptTask struct {
 	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
-	File string
+	File       string
 }
 
 func (t *ScriptTask) getExpressions() []string {
@@ -278,7 +279,7 @@ func (t *ScriptTask) run(context *Context, input *TaskInput) (*TaskOutput, error
 
 type PropertiesTask struct {
 	CommonTask `yaml:",inline"`
-	Files []string `yaml:"files"`
+	Files      []string `yaml:"files"`
 }
 
 func (t *PropertiesTask) getExpressions() []string {
@@ -302,7 +303,7 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
-		
+
 		file, err := os.Open(evaluated)
 
 		if err != nil {
@@ -316,16 +317,16 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			if (strings.TrimSpace(line) == "") {
+			if strings.TrimSpace(line) == "" {
 				continue
 			}
-			
+
 			if strings.HasPrefix(strings.TrimSpace(line), "#") {
 				continue
 			}
-			
+
 			if strings.HasPrefix(strings.TrimSpace(line), "export ") {
-				line = line[len("export "):len(line)]
+				line = line[len("export "):]
 			}
 
 			equalIndex := strings.Index(line, "=")
@@ -335,7 +336,7 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 			}
 
 			key := line[0:equalIndex]
-			value := line[equalIndex+1 : len(line)]
+			value := line[equalIndex+1:]
 
 			vars[key] = value
 		}
@@ -352,7 +353,7 @@ func (t *PropertiesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 
 type VarsTask struct {
 	CommonTask `yaml:",inline"`
-	Vars map[string]string `yaml:",inline"`
+	Vars       map[string]string `yaml:",inline"`
 }
 
 func (e *VarsTask) getExpressions() []string {
@@ -371,7 +372,7 @@ func (e *VarsTask) getType() string {
 
 func (e *VarsTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
 	vars := make(map[string]string)
-	
+
 	for key, val := range e.Vars {
 
 		expr := Expression{
@@ -386,15 +387,15 @@ func (e *VarsTask) run(context *Context, input *TaskInput) (*TaskOutput, error) 
 
 		vars[key] = evaluated
 	}
-	
+
 	return &TaskOutput{
-		vars:vars,
+		vars: vars,
 	}, nil
 }
 
 type EnvsTask struct {
 	CommonTask `yaml:",inline"`
-	Envs map[string]string `yaml:",inline"`
+	Envs       map[string]string `yaml:",inline"`
 }
 
 func (e *EnvsTask) getExpressions() []string {
@@ -413,16 +414,16 @@ func (e *EnvsTask) getType() string {
 
 func (e *EnvsTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
 	vars := make(map[string]string)
-	
+
 	if e.name == "" {
 		for _, env := range os.Environ() {
 			pair := strings.SplitN(env, "=", 2)
 			vars[pair[0]] = pair[1]
 		}
 	}
-	
+
 	return &TaskOutput{
-		vars:vars,
+		vars: vars,
 	}, nil
 }
 
@@ -432,13 +433,19 @@ type TerraformInit struct {
 
 type TerraformTask struct {
 	CommonTask `yaml:",inline"`
-	Location string `yaml:"location"`
+	Location   string `yaml:"location"`
 	Executable `yaml:",inline"`
-	Init TerraformInit `yaml:"init"`
+	Init       TerraformInit     `yaml:"init"`
+	Vars       map[string]string `yaml:"vars"`
 }
 
 func (t *TerraformTask) getExpressions() []string {
 	result := append(t.Executable.getExpressions(), t.Init.getExpressions()...)
+
+	for _, value := range t.Vars {
+		result = append(result, value)
+	}
+
 	return append(result, t.Location)
 }
 
@@ -447,21 +454,68 @@ func (e *TerraformTask) getType() string {
 }
 
 func (e *TerraformTask) run(context *Context, input *TaskInput) (*TaskOutput, error) {
+	envs := make(map[string]string)
+
+	for key, val := range e.Envs {
+		expr := Expression{
+			Expr: val,
+		}
+
+		evaluated, err := expr.Evaluate(input)
+
+		if err != nil {
+			return nil, errors.Wrap(err, 0)
+		}
+
+		envs[key] = evaluated
+	}
+
+	for _, env := range os.Environ() {
+		pair := strings.SplitN(env, "=", 2)
+		envs[pair[0]] = pair[1]
+	}
+
+	planvars := make([]tfexec.PlanOption, 0)
+	applyvars := make([]tfexec.ApplyOption, 0)
+
+	for key, val := range e.Vars {
+		expr := Expression{
+			Expr: val,
+		}
+
+		evaluated, err := expr.Evaluate(input)
+
+		if err != nil {
+			return nil, errors.Wrap(err, 0)
+		}
+
+		tfvar := fmt.Sprintf("%v=%v", key, evaluated)
+
+		fmt.Printf("%v\n", tfvar)
+
+		planvars = append(planvars, tfexec.Var(tfvar))
+		applyvars = append(applyvars, tfexec.Var(tfvar))
+	}
+
 	tf, err := tfexec.NewTerraform(context.getWorkingDirectory(), "/usr/local/bin/terraform")
-	
+
+	if err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+
 	tf.SetStdout(os.Stdin)
 	tf.SetStderr(os.Stderr)
-	
+
+	if err := tf.SetEnv(envs); err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+
+	shouldrun, err := tf.Plan(gocontext.TODO(), planvars...)
+
 	if err != nil {
 		return nil, errors.Wrap(err, 0)
 	}
-	
-	shouldrun, err := tf.Plan(gocontext.TODO())
-	
-	if err != nil {
-		return nil, errors.Wrap(err, 0)
-	}
-	
+
 	if shouldrun {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Print(`
@@ -470,38 +524,38 @@ Do you want to perform these actions?
   Only 'yes' will be accepted to approve.
 
   Enter a value: `)
-  		
-  		answer, err := reader.ReadString('\n')
-  		
-  		if err != nil {
+
+		answer, err := reader.ReadString('\n')
+
+		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
-		
-		if "yes" != strings.TrimSpace(answer) {
+
+		if strings.TrimSpace(answer) != "yes" {
 			return nil, errors.Errorf("Aborted!")
 		}
-		
-		tf.Apply(gocontext.TODO())
-		
+
+		tf.Apply(gocontext.TODO(), applyvars...)
+
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
 	}
-	
+
 	terraformOutput, err := tf.Output(gocontext.TODO())
-	
+
 	if err != nil {
 		return nil, errors.Wrap(err, 0)
 	}
-	
+
 	vars := make(map[string]string)
-	
+
 	for key, val := range terraformOutput {
 		valstr := string(val.Value)
-		
+
 		vars[key] = valstr
 	}
-	
+
 	return &TaskOutput{
 		vars: vars,
 	}, nil
@@ -510,8 +564,8 @@ Do you want to perform these actions?
 type AnsiblePlaybookTask struct {
 	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
-	Playbook string `yaml:"playbook"`
-	Inventory string `yaml:"inventory"`
+	Playbook   string `yaml:"playbook"`
+	Inventory  string `yaml:"inventory"`
 }
 
 func (a *AnsiblePlaybookTask) getExpressions() []string {
@@ -529,7 +583,7 @@ func (a *AnsiblePlaybookTask) run(context *Context, input *TaskInput) (*TaskOutp
 type KubernetesTask struct {
 	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
-	File string `yaml:"file"`
+	File       string `yaml:"file"`
 }
 
 func (k *KubernetesTask) getExpressions() []string {
@@ -547,7 +601,7 @@ func (k *KubernetesTask) run(context *Context, input *TaskInput) (*TaskOutput, e
 type HelmfileTask struct {
 	CommonTask `yaml:",inline"`
 	Executable `yaml:",inline"`
-	File string `yaml:"file"`
+	File       string `yaml:"file"`
 }
 
 func (t *HelmfileTask) getExpressions() []string {
@@ -568,63 +622,63 @@ type Plan struct {
 
 func BuildPlan(root *Directory, taskNames []string) (*Plan, error) {
 	tasks := make(map[string]*TaskDependencies)
-	
+
 	for _, taskname := range taskNames {
 		task, err := root.TaskByUri(taskname)
 
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
-		
+
 		if err := addTaskWithDependencies(task, tasks); err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
 	}
-	
+
 	graph := topsort.NewGraph()
-	
-	for  dependent, dependentTask := range tasks {
-		for dependee, _ := range dependentTask.Dependencies {
+
+	for dependent, dependentTask := range tasks {
+		for dependee := range dependentTask.Dependencies {
 			if err := graph.AddEdge(dependent, dependee); err != nil {
 				return nil, errors.Wrap(err, 0)
 			}
 		}
 	}
-	
+
 	alreadyAdded := make(map[string]bool)
-	finalTasks := make([]Task,0)
-	
+	finalTasks := make([]Task, 0)
+
 	for _, taskname := range taskNames {
 		task, err := root.TaskByUri(taskname)
-		
+
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
-		
+
 		sortedTasks, err := graph.TopSort(task.getPath(task.getType()))
-		
+
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
-		
+
 		for _, sortedTaskName := range sortedTasks {
 			taskToAdd, ok := tasks[sortedTaskName]
-			
-			if (!ok) {
+
+			if !ok {
 				return nil, errors.Errorf("Task not found in sorted list %v", sortedTaskName)
 			}
-			
-			added, ok := alreadyAdded[sortedTaskName]
-			
+
+			added := alreadyAdded[sortedTaskName]
+
 			if added {
 				continue
 			}
-			
+
 			finalTasks = append(finalTasks, taskToAdd.Task)
 			alreadyAdded[sortedTaskName] = true
 		}
 	}
-	
+
 	return &Plan{
 		tasks: finalTasks,
 	}, nil
@@ -632,42 +686,42 @@ func BuildPlan(root *Directory, taskNames []string) (*Plan, error) {
 
 func addTaskWithDependencies(task Task, tasks map[string]*TaskDependencies) error {
 	_, found := tasks[task.getPath(task.getType())]
-	
+
 	if found {
 		return nil
 	}
-	
+
 	taskWithDeps, err := BuildTaskDependencies(task)
-	
-	if (err != nil) {
+
+	if err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	tasks[task.getPath(task.getType())] = taskWithDeps
-	
+
 	for _, dep := range taskWithDeps.Dependencies {
 		if err := addTaskWithDependencies(dep, tasks); err != nil {
 			return errors.Wrap(err, 0)
 		}
 	}
-	
+
 	return nil
 }
 
 type TaskDependencies struct {
-	Task Task
+	Task         Task
 	Dependencies map[string]Task
 }
 
 func BuildTaskDependencies(task Task) (*TaskDependencies, error) {
 	dependencies := make(map[string]Task)
 	expressions := task.getExpressions()
-	
+
 	for _, expr := range expressions {
 		expr := Expression{
 			Expr: expr,
 		}
-		
+
 		for _, token := range expr.getTokens() {
 			dotIndex := strings.LastIndex(token, ".")
 
@@ -682,14 +736,14 @@ func BuildTaskDependencies(task Task) (*TaskDependencies, error) {
 			if err != nil {
 				return nil, errors.Wrap(err, 0)
 			}
-			
+
 			dependencies[dependentTask.getPath(dependentTask.getType())] = dependentTask
 		}
 	}
-	
+
 	return &TaskDependencies{
-		Task:task,
-		Dependencies:dependencies,
+		Task:         task,
+		Dependencies: dependencies,
 	}, nil
 }
 
@@ -698,11 +752,11 @@ func (p *Plan) run(context *Context) error {
 
 	for _, task := range p.tasks {
 		fmt.Printf("Running %v.%v\n", task.getType(), task.getName())
-		
+
 		if err := context.pushWorkingDirectory(task); err != nil {
 			return errors.Wrap(err, 0)
 		}
-		
+
 		input, err := buildTaskInput(task, context)
 
 		if err != nil {
@@ -714,13 +768,13 @@ func (p *Plan) run(context *Context) error {
 		if err != nil {
 			return errors.Wrap(err, 0)
 		}
-		
+
 		if output == nil {
 			return errors.Errorf("Output is null for task %v", task)
 		}
-		
+
 		context.outputs[task.getPath(task.getType())] = output
-		
+
 		if err := context.popWorkingDirectory(); err != nil {
 			return errors.Wrap(err, 0)
 		}
@@ -746,7 +800,7 @@ func buildTaskInput(task Task, context *Context) (*TaskInput, error) {
 			}
 
 			path := token[0:dotIndex]
-			name := token[dotIndex+1 : len(token)]
+			name := token[dotIndex+1:]
 
 			outputTask, err := task.TaskByUri(path)
 
@@ -771,7 +825,7 @@ func buildTaskInput(task Task, context *Context) (*TaskInput, error) {
 	}
 
 	return &TaskInput{
-		vars:             vars,
+		vars: vars,
 	}, nil
 }
 
@@ -780,7 +834,7 @@ type Expression struct {
 }
 
 func (e *Expression) getTokens() []string {
-	r := regexp.MustCompile("\\${[^}]*}")
+	r := regexp.MustCompile(`\${[^}]*}`)
 	matches := r.FindAllString(e.Expr, -1)
 
 	for idx, match := range matches {
@@ -794,6 +848,8 @@ func (e *Expression) getTokens() []string {
 func (e *Expression) Evaluate(input *TaskInput) (string, error) {
 	tmplstring := e.Expr
 	values := make(map[string]string)
+
+	isBashSnippet := strings.HasPrefix(tmplstring, "{{bash")
 	isValidGoTemplate := strings.HasPrefix(tmplstring, "{{")
 
 	for _, token := range e.getTokens() {
@@ -804,42 +860,52 @@ func (e *Expression) Evaluate(input *TaskInput) (string, error) {
 		}
 
 		escapedToken := strings.ReplaceAll(token, ".", "_")
+		escapedToken = strings.ReplaceAll(escapedToken, "-", "_")
 
-		if isValidGoTemplate {
-			tmplstring = strings.ReplaceAll(tmplstring, "${"+token+"}", "."+escapedToken)
+		if isBashSnippet {
+			tmplstring = strings.ReplaceAll(tmplstring, "${"+token+"}", val)
 		} else {
-			tmplstring = strings.ReplaceAll(tmplstring, "${"+token+"}", "{{."+escapedToken+"}}")
-		}
+			if isValidGoTemplate {
+				tmplstring = strings.ReplaceAll(tmplstring, "${"+token+"}", "."+escapedToken)
+			} else {
+				tmplstring = strings.ReplaceAll(tmplstring, "${"+token+"}", "{{."+escapedToken+"}}")
+			}
 
-		values[escapedToken] = val
+			values[escapedToken] = val
+		}
+	}
+
+	if isBashSnippet {
+		return e.runBashSnippet(tmplstring[len("{{bash") : len(tmplstring)-3])
 	}
 
 	funcMap := template.FuncMap{
 		"bash": func(script string) (string, error) {
-			file, err := ioutil.TempFile(os.TempDir(), "stitcher-bash-******.sh")
+			fmt.Printf("%v\n", script)
+			file, err := ioutil.TempFile(os.TempDir(), "stitcher-bash-*.sh")
 
 			if err != nil {
-				return "", err
+				return "", errors.Wrap(err, 0)
 			}
 
 			defer os.Remove(file.Name())
 			defer file.Close()
 
-			file.Write([]byte(script))
+			file.Write([]byte("set -o pipefail\n" + script))
 
 			exec := Executable{
 				Args: []string{
 					file.Name(),
 				},
 			}
-			
+
 			result, err := exec.Run("/bin/bash", false)
 
 			if err != nil {
-				return "", err
+				return "", errors.Wrap(err, 0)
 			}
 
-			if result.Stdout[len(result.Stdout)-1] == '\n' {
+			if len(result.Stdout) > 0 && result.Stdout[len(result.Stdout)-1] == '\n' {
 				return result.Stdout[0 : len(result.Stdout)-1], nil
 			}
 
@@ -849,7 +915,7 @@ func (e *Expression) Evaluate(input *TaskInput) (string, error) {
 			bytes, err := ioutil.ReadFile(path)
 
 			if err != nil {
-				return "", err
+				return "", errors.Wrap(err, 0)
 			}
 
 			return string(bytes), nil
@@ -865,7 +931,8 @@ func (e *Expression) Evaluate(input *TaskInput) (string, error) {
 	tmpl, err := template.New("expr").Funcs(funcMap).Parse(tmplstring)
 
 	if err != nil {
-		return "", errors.Errorf("Error parsing template %v - %v", tmplstring, err)
+		fmt.Printf("Failed template %v\n", tmplstring)
+		return "", errors.Wrap(err, 0)
 	}
 
 	var output strings.Builder
@@ -873,10 +940,42 @@ func (e *Expression) Evaluate(input *TaskInput) (string, error) {
 	err = tmpl.Execute(&output, values)
 
 	if err != nil {
-		return "", errors.Errorf("Error executing template %v - %v", tmplstring, err)
+		return "", errors.Wrap(err, 0)
 	}
 
 	return output.String(), nil
+}
+
+func (e *Expression) runBashSnippet(script string) (string, error) {
+	file, err := ioutil.TempFile(os.TempDir(), "stitcher-bash-*.sh")
+
+	if err != nil {
+		return "", errors.Wrap(err, 0)
+	}
+
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	file.Write([]byte("set -o pipefail\n" + script))
+
+	exec := Executable{
+		Args: []string{
+			file.Name(),
+		},
+	}
+
+	result, err := exec.Run("/bin/bash", false)
+
+	if err != nil {
+		fmt.Printf("Failed script %v\n", script)
+		return "", errors.Wrap(err, 0)
+	}
+
+	if len(result.Stdout) > 0 && result.Stdout[len(result.Stdout)-1] == '\n' {
+		return result.Stdout[0 : len(result.Stdout)-1], nil
+	}
+
+	return result.Stdout, nil
 }
 
 type Directory struct {
@@ -890,11 +989,11 @@ type Directory struct {
 
 func NewDirectory(name string, parent *Directory) *Directory {
 	return &Directory{
-		name:             name,
-		parent:           parent,
-		children:         make(map[string]*Directory, 0),
-		tasks:            make(map[string]Task, 0),
-		shortNamesIndex:  make(map[string][]Task, 0),
+		name:            name,
+		parent:          parent,
+		children:        make(map[string]*Directory),
+		tasks:           make(map[string]Task),
+		shortNamesIndex: make(map[string][]Task),
 	}
 }
 
@@ -945,7 +1044,7 @@ func (d *Directory) TaskByUri(uri string) (Task, error) {
 
 func (d *Directory) findTask(uriParts []string) (Task, error) {
 	if len(uriParts) < 2 {
-		taskName := strings.Join(uriParts[0:len(uriParts)], ".")
+		taskName := strings.Join(uriParts[0:], ".")
 		task, ok := d.tasks[taskName]
 
 		if !ok {
@@ -961,16 +1060,16 @@ func (d *Directory) findTask(uriParts []string) (Task, error) {
 		return nil, errors.Errorf("Directory not found %v in %v", uriParts, d.GetPath())
 	}
 
-	return dir.findTask(uriParts[1:len(uriParts)])
+	return dir.findTask(uriParts[1:])
 }
 
 func (d *Directory) GetPath() string {
 	if d.parent == nil {
 		return d.name
 	}
-	
+
 	path := d.parent.GetPath()
-	
+
 	if path == "" {
 		return d.name
 	} else {
@@ -979,18 +1078,18 @@ func (d *Directory) GetPath() string {
 }
 
 func (d *Directory) getWorkingDirectory() string {
-	if (d.workingDirectory != "" && strings.HasPrefix(d.workingDirectory, "/")) {
+	if d.workingDirectory != "" && strings.HasPrefix(d.workingDirectory, "/") {
 		return d.workingDirectory
 	}
-	
+
 	var dir string
-	
-	if (d.parent == nil) {
+
+	if d.parent == nil {
 		dir = d.name
-	} else  {
+	} else {
 		dir = d.parent.getWorkingDirectory()
 	}
-	
+
 	if d.workingDirectory != "" {
 		return filepath.Join(dir, d.workingDirectory)
 	} else {
@@ -1001,60 +1100,60 @@ func (d *Directory) getWorkingDirectory() string {
 func (d *Directory) DecodeYaml(y map[interface{}]interface{}) error {
 	for keyobj, value := range y {
 		key, ok := keyobj.(string)
-		
+
 		if !ok {
 			return errors.Errorf("Key is not a string - %v", key)
 		}
-		
+
 		if strings.HasPrefix(key, "./") {
-			dirname := key[2:len(key)]
+			dirname := key[2:]
 			newdir := NewDirectory(dirname, d)
 			d.children[dirname] = newdir
-			
-			valuemap, ok := (value).(map[interface{}]interface{});
-			
+
+			valuemap, ok := (value).(map[interface{}]interface{})
+
 			if !ok {
 				return errors.Errorf("Value is not a map - %t", value)
 			}
-			
+
 			if err := newdir.DecodeYaml(valuemap); err != nil {
 				return errors.Wrap(err, 0)
 			}
 		} else {
 			parts := strings.Split(key, ".")
-			
-			if (len(parts) < 1 || len(parts) > 2) {
+
+			if len(parts) < 1 || len(parts) > 2 {
 				return errors.Errorf("Invalid task name %v", key)
 			}
-			
+
 			tasktype := parts[0]
 			name := ""
-			
+
 			if len(parts) > 1 {
 				name = parts[1]
 			}
-			
+
 			task, err := registry.build(tasktype, name)
-			
+
 			if err != nil {
 				return errors.Wrap(err, 0)
 			}
-			
+
 			task.setName(name)
-			
+
 			marshalledtask, err := yaml.Marshal(value)
-			
+
 			if err != nil {
 				return errors.Wrap(err, 0)
 			}
-			
+
 			decoder := yaml.NewDecoder(bytes.NewReader(marshalledtask))
 			decoder.Decode(task)
-			
+
 			d.addTask(task)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1066,11 +1165,11 @@ func (d *Directory) PrintTree(depth int) {
 	} else {
 		fmt.Printf("%v%v\n", prefix, d.name)
 	}
-	
+
 	for _, dir := range d.children {
 		dir.PrintTree(depth + 1)
 	}
-	
+
 	for _, task := range d.tasks {
 		if task.getName() == "" {
 			fmt.Printf("%v\t%v (%v)\n", prefix, task.getType(), task.getWorkingDirectory())
@@ -1089,37 +1188,37 @@ type TaskRegistry struct {
 
 func (r *TaskRegistry) build(tasktype string, name string) (Task, error) {
 	t, ok := r.types[tasktype]
-	
+
 	if !ok {
 		return nil, errors.Errorf("Unknown task type %v", tasktype)
 	}
-	
+
 	newtaskobj := reflect.New(t).Interface()
 	newtask, ok := newtaskobj.(Task)
-	
+
 	if !ok {
 		return nil, errors.Errorf("Invalid task type %t", newtaskobj)
 	}
-	
+
 	return newtask, nil
 }
 
 func mainRun() error {
 	registry = TaskRegistry{
-		types:map[string]reflect.Type{
-			"script":reflect.TypeOf(ScriptTask{}),
-			"envs":reflect.TypeOf(EnvsTask{}),
-			"vars":reflect.TypeOf(VarsTask{}),
-			"properties":reflect.TypeOf(PropertiesTask{}),
-			"terraform":reflect.TypeOf(TerraformTask{}),
-			"ansible-playbook":reflect.TypeOf(AnsiblePlaybookTask{}),
-			"kubernetes":reflect.TypeOf(KubernetesTask{}),
-			"helmfile":reflect.TypeOf(HelmfileTask{}),
+		types: map[string]reflect.Type{
+			"script":           reflect.TypeOf(ScriptTask{}),
+			"envs":             reflect.TypeOf(EnvsTask{}),
+			"vars":             reflect.TypeOf(VarsTask{}),
+			"properties":       reflect.TypeOf(PropertiesTask{}),
+			"terraform":        reflect.TypeOf(TerraformTask{}),
+			"ansible-playbook": reflect.TypeOf(AnsiblePlaybookTask{}),
+			"kubernetes":       reflect.TypeOf(KubernetesTask{}),
+			"helmfile":         reflect.TypeOf(HelmfileTask{}),
 		},
 	}
-	
+
 	root := NewDirectory("", nil)
-	
+
 	bytes, err := ioutil.ReadFile("/home/david/work/my-projects/stitcher/stitcher.yml")
 
 	if err != nil {
@@ -1132,38 +1231,37 @@ func mainRun() error {
 	if err := root.DecodeYaml(y); err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	envs := EnvsTask{
 		CommonTask: CommonTask{
 			name: "",
 		},
 	}
-	
+
 	root.addTask(&envs)
-	
+
 	root.PrintTree(0)
 	fmt.Printf("---------------\n")
-	
-	taskToRun := []string{"kubernetes.sightd.helmfile"}
-	
+
+	taskToRun := []string{"ami.script"}
+
 	plan, err := BuildPlan(root, taskToRun)
-	
+
 	if err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	fmt.Printf("Plan is %+v\n", plan)
-	
+
 	cwd, err := os.Getwd()
 
 	if err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	context := Context{
-		outputs: make(map[string]*TaskOutput),
-		workingDirectoryStack: []string{ cwd, "/home/david/work/sightd/git/sgh-ops" },
-		
+		outputs:               make(map[string]*TaskOutput),
+		workingDirectoryStack: []string{cwd, "/home/david/work/sightd/git/sgh-ops"},
 	}
 
 	err = plan.run(&context)
@@ -1171,19 +1269,19 @@ func mainRun() error {
 	if err != nil {
 		return errors.Wrap(err, 0)
 	}
-	
+
 	return nil
 }
 
 func main() {
 	err := mainRun()
-	
+
 	if err != nil {
 		switch err := err.(type) {
 		case *errors.Error:
-			fmt.Println("Error:", err.ErrorStack())
+			fmt.Printf("Error: %v\n", err.ErrorStack())
 		default:
-			fmt.Printf("Error:", err)
+			fmt.Printf("Error: %v\n", err)
 		}
 
 		os.Exit(1)
