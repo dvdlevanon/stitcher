@@ -3,7 +3,7 @@ package registry
 import (
 	"sync"
 
-	"github.com/dvdlevanon/stitcher/pkg/model"
+	"github.com/dvdlevanon/stitcher/src/model"
 	"github.com/go-errors/errors"
 )
 

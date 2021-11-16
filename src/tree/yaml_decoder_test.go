@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dvdlevanon/stitcher/pkg/model"
-	"github.com/dvdlevanon/stitcher/pkg/registry"
+	"github.com/dvdlevanon/stitcher/src/model"
+	"github.com/dvdlevanon/stitcher/src/registry"
 )
 
 var sampleYaml = `

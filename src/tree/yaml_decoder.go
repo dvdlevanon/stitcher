@@ -5,8 +5,8 @@ import (
 	"io/ioutil"
 	"strings"
 
-	"github.com/dvdlevanon/stitcher/pkg/model"
-	"github.com/dvdlevanon/stitcher/pkg/registry"
+	"github.com/dvdlevanon/stitcher/src/model"
+	"github.com/dvdlevanon/stitcher/src/registry"
 	"github.com/go-errors/errors"
 	"gopkg.in/yaml.v2"
 )
