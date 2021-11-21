@@ -20,23 +20,31 @@ var globalRegistry = taskRegistry{
 	types: make(map[string]TaskBuilder),
 }
 
-func Register(name string, tasktype TaskBuilder) error {
-	return globalRegistry.register(name, tasktype)
+func Register(tasktype string, builder TaskBuilder) error {
+	return globalRegistry.register(tasktype, builder)
 }
 
 func Build(tasktype string, name string, parent model.Directory) (model.Task, error) {
 	return globalRegistry.build(tasktype, name, parent)
 }
 
-func (r *taskRegistry) register(name string, tasktype TaskBuilder) error {
+func (r *taskRegistry) register(tasktype string, builder TaskBuilder) error {
+	if tasktype == "" {
+		return errors.Errorf("Task type is empty")
+	}
+
+	if builder == nil {
+		return errors.Errorf("Task builder is nil")
+	}
+
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	if _, ok := r.types[name]; ok {
-		return errors.Errorf("Task already exists %v", name)
+	if _, ok := r.types[tasktype]; ok {
+		return errors.Errorf("Task already exists %v", tasktype)
 	}
 
-	r.types[name] = tasktype
+	r.types[tasktype] = builder
 	return nil
 }
 

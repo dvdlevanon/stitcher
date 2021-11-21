@@ -41,6 +41,7 @@ func (d *directory) GetChildren() []model.Directory {
 
 	for _, child := range d.children {
 		result[index] = child
+		index = index + 1
 	}
 
 	return result
@@ -52,6 +53,7 @@ func (d *directory) GetTasks() []model.Task {
 
 	for _, task := range d.tasks {
 		result[index] = task
+		index = index + 1
 	}
 
 	return result
@@ -64,8 +66,16 @@ func DecodeFile(file string) (*directory, error) {
 		return nil, errors.Wrap(err, 0)
 	}
 
+	return DecodeBytes(bytes)
+}
+
+func DecodeBytes(bytes []byte) (*directory, error) {
 	y := make(map[interface{}]interface{})
-	yaml.Unmarshal(bytes, y)
+	err := yaml.Unmarshal(bytes, y)
+
+	if err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
 
 	return DecodeYaml(y)
 }
@@ -106,10 +116,14 @@ func (d *directory) decodeDirectory(name string, value interface{}) error {
 	newdir := newDirectory(name, d)
 	d.children[name] = newdir
 
+	if value == nil {
+		return nil
+	}
+
 	valuemap, ok := (value).(map[interface{}]interface{})
 
 	if !ok {
-		return errors.Errorf("Value is not a map - %t", value)
+		return errors.Errorf("Value is not a map - %T", value)
 	}
 
 	if err := newdir.decodeYaml(valuemap); err != nil {
@@ -141,6 +155,10 @@ func (d *directory) decodeTask(id string, value interface{}) error {
 }
 
 func parseTaskId(id string) (string, string, error) {
+	if len(id) == 0 {
+		return "", "", errors.Errorf("Empty task id")
+	}
+
 	parts := strings.Split(id, ".")
 
 	if len(parts) < 1 || len(parts) > 2 {
@@ -187,5 +205,10 @@ func unmarshalTask(task model.Task, value interface{}) error {
 	}
 
 	decoder := yaml.NewDecoder(bytes.NewReader(marshalledtask))
-	return decoder.Decode(task)
+
+	if err := decoder.Decode(&task); err != nil {
+		return err
+	}
+
+	return nil
 }
